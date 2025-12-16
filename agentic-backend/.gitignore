@@ -1,0 +1,27 @@
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+ENV/
+
+# Environment variables
+.env
+
+# VSCode
+.vscode/
+
+# Database
+*.db
+*.sqlite
