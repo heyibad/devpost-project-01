@@ -676,4 +676,61 @@ export const adminApi = {
         });
         return response.data;
     },
+
+    // Bulk Actions
+    bulkApproveUsers: async (userIds: string[], sendEmail: boolean = true) => {
+        const response = await api.post<{
+            success_count: number;
+            failed_count: number;
+            message: string;
+        }>("/api/v1/admin/waitlist/bulk-approve", {
+            user_ids: userIds,
+            send_email: sendEmail,
+        });
+        return response.data;
+    },
+
+    bulkRejectUsers: async (userIds: string[]) => {
+        const response = await api.post<{
+            success_count: number;
+            failed_count: number;
+            message: string;
+        }>("/api/v1/admin/waitlist/bulk-reject", {
+            user_ids: userIds,
+            send_email: false,
+        });
+        return response.data;
+    },
+
+    // Email Composer
+    sendEmail: async (toEmails: string[], subject: string, message: string) => {
+        const response = await api.post<{
+            success_count: number;
+            failed: string[];
+            message: string;
+        }>("/api/v1/admin/send-email", {
+            to_emails: toEmails,
+            subject,
+            message,
+        });
+        return response.data;
+    },
+
+    getUserEmails: async (approvedOnly: boolean = false) => {
+        const response = await api.get<Array<{ email: string; name: string }>>(
+            "/api/v1/admin/users/emails",
+            { params: { approved_only: approvedOnly } }
+        );
+        return response.data;
+    },
+
+    // Toggle User Access (approve/revoke for any user)
+    toggleUserAccess: async (userId: string) => {
+        const response = await api.post<{
+            success: boolean;
+            message: string;
+            email_sent: boolean;
+        }>(`/api/v1/admin/users/${userId}/toggle-access`);
+        return response.data;
+    },
 };

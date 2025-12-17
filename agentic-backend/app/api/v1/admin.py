@@ -134,6 +134,37 @@ class WaitlistSettingsRequest(BaseModel):
     waitlist_enabled: bool
 
 
+class BulkApproveRequest(BaseModel):
+    """Request to bulk approve/reject users."""
+
+    user_ids: List[UUID]
+    send_email: bool = True
+
+
+class BulkApproveResponse(BaseModel):
+    """Response after bulk approve/reject."""
+
+    success_count: int
+    failed_count: int
+    message: str
+
+
+class SendEmailRequest(BaseModel):
+    """Request to send custom email to users."""
+
+    to_emails: List[str]
+    subject: str = Field(..., min_length=1, max_length=200)
+    message: str = Field(..., min_length=1, max_length=5000)
+
+
+class SendEmailResponse(BaseModel):
+    """Response after sending emails."""
+
+    success_count: int
+    failed: List[str]
+    message: str
+
+
 # ============================================================================
 # Admin Check Endpoint
 # ============================================================================
@@ -688,3 +719,210 @@ async def remove_user_admin(
         message=f"Admin privileges removed from {tenant_email}",
         email_sent=False,
     )
+
+
+@router.post("/users/{user_id}/toggle-access", response_model=ApproveUserResponse)
+async def toggle_user_access(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Tenant = Depends(get_current_admin),
+):
+    """Toggle access for a user (approve/revoke). Works for any user."""
+    tenant = await db.get(Tenant, user_id)
+
+    if not tenant:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+
+    # Prevent revoking own access
+    if tenant.id == current_admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot revoke your own access",
+        )
+
+    # Store email BEFORE commit
+    tenant_email = tenant.email
+    
+    # Toggle the access
+    new_status = not tenant.is_waitlist_approved
+    tenant.is_waitlist_approved = new_status
+    
+    # Also update waitlist entry if exists
+    stmt = select(Waitlist).where(Waitlist.tenant_id == user_id)
+    result = await db.execute(stmt)
+    waitlist_entry = result.scalar_one_or_none()
+    
+    if waitlist_entry:
+        waitlist_entry.is_approved = new_status
+        if new_status:
+            from datetime import datetime, timezone
+            waitlist_entry.approved_at = datetime.now(timezone.utc)
+            waitlist_entry.approved_by_admin_id = current_admin.id
+        else:
+            waitlist_entry.approved_at = None
+    
+    await db.commit()
+
+    # Clear user cache so the change is reflected immediately
+    try:
+        from app.core import security
+        security._user_cache.pop(str(tenant.id), None)
+    except Exception:
+        pass
+
+    action = "approved" if new_status else "revoked"
+    return ApproveUserResponse(
+        success=True,
+        message=f"Access {action} for {tenant_email}",
+        email_sent=False,
+    )
+
+
+# ============================================================================
+# Bulk Actions
+# ============================================================================
+
+
+@router.post("/waitlist/bulk-approve", response_model=BulkApproveResponse)
+async def bulk_approve_users(
+    request: BulkApproveRequest,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Tenant = Depends(get_current_admin),
+):
+    """Bulk approve multiple waitlist users."""
+    success_count = 0
+    failed_count = 0
+
+    for user_id in request.user_ids:
+        try:
+            # Get waitlist entry
+            stmt = select(Waitlist).where(Waitlist.id == user_id)
+            result = await db.execute(stmt)
+            waitlist = result.scalar_one_or_none()
+
+            if not waitlist or waitlist.is_approved:
+                failed_count += 1
+                continue
+
+            # Approve
+            waitlist.is_approved = True
+            waitlist.approved_at = datetime.utcnow()
+
+            # Update tenant
+            tenant = await db.get(Tenant, waitlist.tenant_id)
+            if tenant:
+                tenant.is_waitlist_approved = True
+
+                # Send email if requested
+                if request.send_email:
+                    await email_service.send_waitlist_approval_email(
+                        to_email=tenant.email,
+                        user_name=tenant.name,
+                    )
+
+            success_count += 1
+
+        except Exception as e:
+            print(f"Error approving user {user_id}: {e}")
+            failed_count += 1
+
+    await db.commit()
+
+    return BulkApproveResponse(
+        success_count=success_count,
+        failed_count=failed_count,
+        message=f"Successfully approved {success_count} users, {failed_count} failed",
+    )
+
+
+@router.post("/waitlist/bulk-reject", response_model=BulkApproveResponse)
+async def bulk_reject_users(
+    request: BulkApproveRequest,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Tenant = Depends(get_current_admin),
+):
+    """Bulk reject/revoke multiple waitlist users."""
+    success_count = 0
+    failed_count = 0
+
+    for user_id in request.user_ids:
+        try:
+            stmt = select(Waitlist).where(Waitlist.id == user_id)
+            result = await db.execute(stmt)
+            waitlist = result.scalar_one_or_none()
+
+            if not waitlist:
+                failed_count += 1
+                continue
+
+            # Revoke approval
+            waitlist.is_approved = False
+            waitlist.approved_at = None
+
+            # Update tenant
+            tenant = await db.get(Tenant, waitlist.tenant_id)
+            if tenant:
+                tenant.is_waitlist_approved = False
+
+            success_count += 1
+
+        except Exception as e:
+            print(f"Error rejecting user {user_id}: {e}")
+            failed_count += 1
+
+    await db.commit()
+
+    return BulkApproveResponse(
+        success_count=success_count,
+        failed_count=failed_count,
+        message=f"Successfully rejected {success_count} users, {failed_count} failed",
+    )
+
+
+# ============================================================================
+# Email Composer
+# ============================================================================
+
+
+@router.post("/send-email", response_model=SendEmailResponse)
+async def send_custom_email(
+    request: SendEmailRequest,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Tenant = Depends(get_current_admin),
+):
+    """Send a custom email to one or more users."""
+    result = await email_service.send_custom_email(
+        to_emails=request.to_emails,
+        subject=request.subject,
+        message=request.message,
+        sender_name=current_admin.name or "Sahulat AI Team",
+    )
+
+    return SendEmailResponse(
+        success_count=result.get("success_count", 0),
+        failed=result.get("failed", []),
+        message=f"Successfully sent {result.get('success_count', 0)} emails",
+    )
+
+
+@router.get("/users/emails")
+async def get_all_user_emails(
+    approved_only: bool = Query(False, description="Only return approved users"),
+    db: AsyncSession = Depends(get_db),
+    current_admin: Tenant = Depends(get_current_admin),
+):
+    """Get all user emails for email composer autocomplete."""
+    if approved_only:
+        stmt = select(Tenant.email, Tenant.name).where(Tenant.is_waitlist_approved == True)
+    else:
+        stmt = select(Tenant.email, Tenant.name)
+
+    result = await db.execute(stmt)
+    users = result.all()
+
+    return [
+        {"email": email, "name": name or email.split("@")[0]}
+        for email, name in users
+    ]

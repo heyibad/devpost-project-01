@@ -14,6 +14,9 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
 import {
     Table,
     TableBody,
@@ -58,17 +61,20 @@ import {
     CheckCircle2,
     XCircle,
     Shield,
-    ShieldOff,
     Mail,
     MailX,
     ChevronLeft,
     ChevronRight,
     RefreshCw,
-    Bot,
     ArrowUpRight,
     Sparkles,
     ArrowLeft,
     LogOut,
+    Send,
+    UserX,
+    CheckCheck,
+    X,
+    XOctagon,
 } from "lucide-react";
 import { format } from "date-fns";
 
@@ -108,6 +114,25 @@ export default function AdminDashboard() {
     // Dialog
     const [selectedUser, setSelectedUser] = useState<WaitlistUser | null>(null);
     const [showApproveDialog, setShowApproveDialog] = useState(false);
+
+    // Bulk selection
+    const [selectedWaitlistIds, setSelectedWaitlistIds] = useState<Set<string>>(
+        new Set()
+    );
+    const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(
+        new Set()
+    );
+    const [bulkActionLoading, setBulkActionLoading] = useState(false);
+
+    // Email composer
+    const [showEmailDialog, setShowEmailDialog] = useState(false);
+    const [emailRecipients, setEmailRecipients] = useState<string[]>([]);
+    const [emailSubject, setEmailSubject] = useState("");
+    const [emailMessage, setEmailMessage] = useState("");
+    const [emailSending, setEmailSending] = useState(false);
+    const [allUserEmails, setAllUserEmails] = useState<
+        Array<{ email: string; name: string }>
+    >([]);
 
     const { toast } = useToast();
 
@@ -187,11 +212,17 @@ export default function AdminDashboard() {
                     ? "New users will need approval before accessing the app."
                     : "All users now have direct access to the app without approval.",
             });
-        } catch (error) {
+        } catch (error: unknown) {
             console.error("Failed to update waitlist settings:", error);
+            // Extract server-provided message when available to give better feedback
+            const errAny = error as any;
+            const serverMsg =
+                errAny?.response?.data?.detail ||
+                errAny?.response?.data?.message ||
+                (errAny?.message ?? "Failed to update waitlist settings");
             toast({
                 title: "Error",
-                description: "Failed to update waitlist settings",
+                description: serverMsg,
                 variant: "destructive",
             });
         } finally {
@@ -313,10 +344,211 @@ export default function AdminDashboard() {
         }
     };
 
+    // Toggle user access (approve/revoke)
+    const handleToggleUserAccess = async (user: AdminUser) => {
+        setActionLoading(user.id);
+        try {
+            const result = await adminApi.toggleUserAccess(user.id);
+            toast({
+                title: user.is_waitlist_approved
+                    ? "Access Revoked"
+                    : "Access Granted",
+                description: result.message,
+            });
+            loadUsers();
+            loadStats();
+        } catch (error: unknown) {
+            console.error("Failed to toggle user access:", error);
+            const message =
+                error instanceof Error
+                    ? error.message
+                    : "Failed to update user access";
+            toast({
+                title: "Error",
+                description: message,
+                variant: "destructive",
+            });
+        } finally {
+            setActionLoading(null);
+        }
+    };
+
+    // Bulk selection handlers
+    const toggleWaitlistSelection = (userId: string) => {
+        const newSelection = new Set(selectedWaitlistIds);
+        if (newSelection.has(userId)) {
+            newSelection.delete(userId);
+        } else {
+            newSelection.add(userId);
+        }
+        setSelectedWaitlistIds(newSelection);
+    };
+
+    const selectAllWaitlist = () => {
+        if (selectedWaitlistIds.size === waitlistUsers.length) {
+            setSelectedWaitlistIds(new Set());
+        } else {
+            setSelectedWaitlistIds(new Set(waitlistUsers.map((u) => u.id)));
+        }
+    };
+
+    const selectAllUsers = () => {
+        if (selectedUserIds.size === allUsers.length) {
+            setSelectedUserIds(new Set());
+        } else {
+            setSelectedUserIds(new Set(allUsers.map((u) => u.id)));
+        }
+    };
+
+    // Bulk approve
+    const handleBulkApprove = async () => {
+        if (selectedWaitlistIds.size === 0) return;
+        setBulkActionLoading(true);
+        try {
+            const result = await adminApi.bulkApproveUsers(
+                Array.from(selectedWaitlistIds),
+                sendEmail
+            );
+            toast({
+                title: "Bulk Approve Complete 🎉",
+                description: result.message,
+            });
+            setSelectedWaitlistIds(new Set());
+            loadWaitlist();
+            loadStats();
+        } catch (error) {
+            console.error("Bulk approve failed:", error);
+            toast({
+                title: "Error",
+                description: "Failed to bulk approve users",
+                variant: "destructive",
+            });
+        } finally {
+            setBulkActionLoading(false);
+        }
+    };
+
+    // Bulk reject
+    const handleBulkReject = async () => {
+        if (selectedWaitlistIds.size === 0) return;
+        setBulkActionLoading(true);
+        try {
+            const result = await adminApi.bulkRejectUsers(
+                Array.from(selectedWaitlistIds)
+            );
+            toast({
+                title: "Bulk Reject Complete",
+                description: result.message,
+            });
+            setSelectedWaitlistIds(new Set());
+            loadWaitlist();
+            loadStats();
+        } catch (error) {
+            console.error("Bulk reject failed:", error);
+            toast({
+                title: "Error",
+                description: "Failed to bulk reject users",
+                variant: "destructive",
+            });
+        } finally {
+            setBulkActionLoading(false);
+        }
+    };
+
+    // Email composer
+    const openEmailComposer = (emails?: string[]) => {
+        if (emails && emails.length > 0) {
+            setEmailRecipients(emails);
+        } else {
+            setEmailRecipients([]);
+        }
+        setEmailSubject("");
+        setEmailMessage("");
+        setShowEmailDialog(true);
+    };
+
+    const loadUserEmails = async () => {
+        try {
+            const emails = await adminApi.getUserEmails();
+            setAllUserEmails(emails);
+        } catch (error) {
+            console.error("Failed to load user emails:", error);
+        }
+    };
+
+    const handleSendEmail = async () => {
+        if (
+            emailRecipients.length === 0 ||
+            !emailSubject.trim() ||
+            !emailMessage.trim()
+        ) {
+            toast({
+                title: "Missing Fields",
+                description: "Please fill in recipients, subject, and message",
+                variant: "destructive",
+            });
+            return;
+        }
+        setEmailSending(true);
+        try {
+            const result = await adminApi.sendEmail(
+                emailRecipients,
+                emailSubject,
+                emailMessage
+            );
+            toast({
+                title: "Emails Sent! 📧",
+                description: `Successfully sent to ${
+                    result.success_count
+                } recipients${
+                    result.failed.length > 0
+                        ? `, ${result.failed.length} failed`
+                        : ""
+                }`,
+            });
+            setShowEmailDialog(false);
+            setEmailRecipients([]);
+            setEmailSubject("");
+            setEmailMessage("");
+        } catch (error) {
+            console.error("Failed to send emails:", error);
+            toast({
+                title: "Error",
+                description: "Failed to send emails",
+                variant: "destructive",
+            });
+        } finally {
+            setEmailSending(false);
+        }
+    };
+
+    const removeEmailRecipient = (email: string) => {
+        setEmailRecipients((prev) => prev.filter((e) => e !== email));
+    };
+
+    const addEmailRecipient = (email: string) => {
+        if (email && !emailRecipients.includes(email)) {
+            setEmailRecipients((prev) => [...prev, email]);
+        }
+    };
+
+    // Email selected waitlist users
+    const emailSelectedUsers = () => {
+        const emails = waitlistUsers
+            .filter((u) => selectedWaitlistIds.has(u.id))
+            .map((u) => u.email);
+        openEmailComposer(emails);
+    };
+
     // Refresh all data
     const handleRefresh = async () => {
         setLoading(true);
-        await Promise.all([loadStats(), loadWaitlist(), loadUsers()]);
+        await Promise.all([
+            loadStats(),
+            loadWaitlist(),
+            loadUsers(),
+            loadUserEmails(),
+        ]);
         setLoading(false);
         toast({
             title: "Refreshed",
@@ -771,6 +1003,77 @@ export default function AdminDashboard() {
                                                     </SelectContent>
                                                 </Select>
                                             </div>
+                                            {/* Bulk Action Buttons */}
+                                            {selectedWaitlistIds.size > 0 && (
+                                                <div className="flex flex-wrap items-center gap-2 pt-2 border-t">
+                                                    <span className="text-xs text-muted-foreground">
+                                                        {
+                                                            selectedWaitlistIds.size
+                                                        }{" "}
+                                                        selected
+                                                    </span>
+                                                    <Button
+                                                        size="sm"
+                                                        className="bg-green-600 hover:bg-green-700 text-xs h-8"
+                                                        onClick={
+                                                            handleBulkApprove
+                                                        }
+                                                        disabled={
+                                                            bulkActionLoading
+                                                        }
+                                                    >
+                                                        {bulkActionLoading ? (
+                                                            <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                                                        ) : (
+                                                            <CheckCheck className="w-3 h-3 mr-1" />
+                                                        )}
+                                                        Approve Selected
+                                                    </Button>
+                                                    <Button
+                                                        size="sm"
+                                                        variant="outline"
+                                                        className="text-red-600 hover:text-red-700 hover:bg-red-50 text-xs h-8"
+                                                        onClick={
+                                                            handleBulkReject
+                                                        }
+                                                        disabled={
+                                                            bulkActionLoading
+                                                        }
+                                                    >
+                                                        {bulkActionLoading ? (
+                                                            <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                                                        ) : (
+                                                            <XOctagon className="w-3 h-3 mr-1" />
+                                                        )}
+                                                        Reject Selected
+                                                    </Button>
+                                                    <Button
+                                                        size="sm"
+                                                        variant="outline"
+                                                        className="text-xs h-8"
+                                                        onClick={() => {
+                                                            const selectedEmails =
+                                                                waitlistUsers
+                                                                    .filter(
+                                                                        (u) =>
+                                                                            selectedWaitlistIds.has(
+                                                                                u.id
+                                                                            )
+                                                                    )
+                                                                    .map(
+                                                                        (u) =>
+                                                                            u.email
+                                                                    );
+                                                            openEmailComposer(
+                                                                selectedEmails
+                                                            );
+                                                        }}
+                                                    >
+                                                        <Send className="w-3 h-3 mr-1" />
+                                                        Email Selected
+                                                    </Button>
+                                                </div>
+                                            )}
                                         </div>
                                     </CardHeader>
                                     <CardContent className="p-3 sm:p-6">
@@ -795,6 +1098,34 @@ export default function AdminDashboard() {
                                                             >
                                                                 <div className="flex items-start justify-between gap-2">
                                                                     <div className="flex items-center gap-2 min-w-0">
+                                                                        <Checkbox
+                                                                            checked={selectedWaitlistIds.has(
+                                                                                user.id
+                                                                            )}
+                                                                            onCheckedChange={() => {
+                                                                                const newSet =
+                                                                                    new Set(
+                                                                                        selectedWaitlistIds
+                                                                                    );
+                                                                                if (
+                                                                                    newSet.has(
+                                                                                        user.id
+                                                                                    )
+                                                                                ) {
+                                                                                    newSet.delete(
+                                                                                        user.id
+                                                                                    );
+                                                                                } else {
+                                                                                    newSet.add(
+                                                                                        user.id
+                                                                                    );
+                                                                                }
+                                                                                setSelectedWaitlistIds(
+                                                                                    newSet
+                                                                                );
+                                                                            }}
+                                                                            className="shrink-0"
+                                                                        />
                                                                         <Avatar className="h-8 w-8 shrink-0">
                                                                             <AvatarImage
                                                                                 src={
@@ -930,6 +1261,19 @@ export default function AdminDashboard() {
                                                     <Table>
                                                         <TableHeader>
                                                             <TableRow>
+                                                                <TableHead className="w-[40px]">
+                                                                    <Checkbox
+                                                                        checked={
+                                                                            selectedWaitlistIds.size ===
+                                                                                waitlistUsers.length &&
+                                                                            waitlistUsers.length >
+                                                                                0
+                                                                        }
+                                                                        onCheckedChange={() =>
+                                                                            selectAllWaitlist()
+                                                                        }
+                                                                    />
+                                                                </TableHead>
                                                                 <TableHead>
                                                                     User
                                                                 </TableHead>
@@ -955,6 +1299,35 @@ export default function AdminDashboard() {
                                                                             user.id
                                                                         }
                                                                     >
+                                                                        <TableCell>
+                                                                            <Checkbox
+                                                                                checked={selectedWaitlistIds.has(
+                                                                                    user.id
+                                                                                )}
+                                                                                onCheckedChange={() => {
+                                                                                    const newSet =
+                                                                                        new Set(
+                                                                                            selectedWaitlistIds
+                                                                                        );
+                                                                                    if (
+                                                                                        newSet.has(
+                                                                                            user.id
+                                                                                        )
+                                                                                    ) {
+                                                                                        newSet.delete(
+                                                                                            user.id
+                                                                                        );
+                                                                                    } else {
+                                                                                        newSet.add(
+                                                                                            user.id
+                                                                                        );
+                                                                                    }
+                                                                                    setSelectedWaitlistIds(
+                                                                                        newSet
+                                                                                    );
+                                                                                }}
+                                                                            />
+                                                                        </TableCell>
                                                                         <TableCell>
                                                                             <div className="flex items-center gap-3">
                                                                                 <Avatar className="h-9 w-9">
@@ -1196,6 +1569,40 @@ export default function AdminDashboard() {
                                                     className="pl-9 w-full sm:w-[250px]"
                                                 />
                                             </div>
+                                            {/* Bulk Action Buttons */}
+                                            {selectedUserIds.size > 0 && (
+                                                <div className="flex flex-wrap items-center gap-2 pt-2 border-t">
+                                                    <span className="text-xs text-muted-foreground">
+                                                        {selectedUserIds.size}{" "}
+                                                        selected
+                                                    </span>
+                                                    <Button
+                                                        size="sm"
+                                                        variant="outline"
+                                                        className="text-xs h-8"
+                                                        onClick={() => {
+                                                            const selectedEmails =
+                                                                allUsers
+                                                                    .filter(
+                                                                        (u) =>
+                                                                            selectedUserIds.has(
+                                                                                u.id
+                                                                            )
+                                                                    )
+                                                                    .map(
+                                                                        (u) =>
+                                                                            u.email
+                                                                    );
+                                                            openEmailComposer(
+                                                                selectedEmails
+                                                            );
+                                                        }}
+                                                    >
+                                                        <Send className="w-3 h-3 mr-1" />
+                                                        Email Selected
+                                                    </Button>
+                                                </div>
+                                            )}
                                         </div>
                                     </CardHeader>
                                     <CardContent className="p-3 sm:p-6">
@@ -1219,6 +1626,34 @@ export default function AdminDashboard() {
                                                         >
                                                             <div className="flex items-start justify-between gap-2">
                                                                 <div className="flex items-center gap-2 min-w-0">
+                                                                    <Checkbox
+                                                                        checked={selectedUserIds.has(
+                                                                            user.id
+                                                                        )}
+                                                                        onCheckedChange={() => {
+                                                                            const newSet =
+                                                                                new Set(
+                                                                                    selectedUserIds
+                                                                                );
+                                                                            if (
+                                                                                newSet.has(
+                                                                                    user.id
+                                                                                )
+                                                                            ) {
+                                                                                newSet.delete(
+                                                                                    user.id
+                                                                                );
+                                                                            } else {
+                                                                                newSet.add(
+                                                                                    user.id
+                                                                                );
+                                                                            }
+                                                                            setSelectedUserIds(
+                                                                                newSet
+                                                                            );
+                                                                        }}
+                                                                        className="shrink-0"
+                                                                    />
                                                                     <Avatar className="h-8 w-8 shrink-0">
                                                                         <AvatarImage
                                                                             src={
@@ -1300,24 +1735,70 @@ export default function AdminDashboard() {
                                                                     }
                                                                 </div>
                                                             </div>
-                                                            <div className="pt-2 border-t flex items-center justify-between">
-                                                                <span className="text-xs text-muted-foreground">
-                                                                    Admin access
-                                                                </span>
-                                                                <Switch
-                                                                    checked={
-                                                                        user.is_admin
-                                                                    }
-                                                                    onCheckedChange={() =>
-                                                                        handleToggleAdmin(
-                                                                            user
-                                                                        )
-                                                                    }
-                                                                    disabled={
-                                                                        actionLoading ===
-                                                                        user.id
-                                                                    }
-                                                                />
+                                                            <div className="pt-2 border-t space-y-2">
+                                                                <div className="flex items-center justify-between">
+                                                                    <span className="text-xs text-muted-foreground">
+                                                                        App
+                                                                        Access
+                                                                    </span>
+                                                                    <Button
+                                                                        size="sm"
+                                                                        variant={
+                                                                            user.is_waitlist_approved
+                                                                                ? "outline"
+                                                                                : "default"
+                                                                        }
+                                                                        className={
+                                                                            user.is_waitlist_approved
+                                                                                ? "text-red-600 hover:text-red-700 hover:bg-red-50 text-xs h-7"
+                                                                                : "bg-green-600 hover:bg-green-700 text-xs h-7"
+                                                                        }
+                                                                        onClick={() =>
+                                                                            handleToggleUserAccess(
+                                                                                user
+                                                                            )
+                                                                        }
+                                                                        disabled={
+                                                                            actionLoading ===
+                                                                            user.id
+                                                                        }
+                                                                    >
+                                                                        {actionLoading ===
+                                                                        user.id ? (
+                                                                            <Loader2 className="w-3 h-3 animate-spin" />
+                                                                        ) : user.is_waitlist_approved ? (
+                                                                            <>
+                                                                                <XCircle className="w-3 h-3 mr-1" />
+                                                                                Revoke
+                                                                            </>
+                                                                        ) : (
+                                                                            <>
+                                                                                <CheckCircle2 className="w-3 h-3 mr-1" />
+                                                                                Approve
+                                                                            </>
+                                                                        )}
+                                                                    </Button>
+                                                                </div>
+                                                                <div className="flex items-center justify-between">
+                                                                    <span className="text-xs text-muted-foreground">
+                                                                        Admin
+                                                                        access
+                                                                    </span>
+                                                                    <Switch
+                                                                        checked={
+                                                                            user.is_admin
+                                                                        }
+                                                                        onCheckedChange={() =>
+                                                                            handleToggleAdmin(
+                                                                                user
+                                                                            )
+                                                                        }
+                                                                        disabled={
+                                                                            actionLoading ===
+                                                                            user.id
+                                                                        }
+                                                                    />
+                                                                </div>
                                                             </div>
                                                         </div>
                                                     ))}
@@ -1328,6 +1809,19 @@ export default function AdminDashboard() {
                                                     <Table>
                                                         <TableHeader>
                                                             <TableRow>
+                                                                <TableHead className="w-[40px]">
+                                                                    <Checkbox
+                                                                        checked={
+                                                                            selectedUserIds.size ===
+                                                                                allUsers.length &&
+                                                                            allUsers.length >
+                                                                                0
+                                                                        }
+                                                                        onCheckedChange={() =>
+                                                                            selectAllUsers()
+                                                                        }
+                                                                    />
+                                                                </TableHead>
                                                                 <TableHead>
                                                                     User
                                                                 </TableHead>
@@ -1339,6 +1833,9 @@ export default function AdminDashboard() {
                                                                 </TableHead>
                                                                 <TableHead>
                                                                     Joined
+                                                                </TableHead>
+                                                                <TableHead>
+                                                                    Access
                                                                 </TableHead>
                                                                 <TableHead className="text-right">
                                                                     Admin
@@ -1353,6 +1850,35 @@ export default function AdminDashboard() {
                                                                             user.id
                                                                         }
                                                                     >
+                                                                        <TableCell>
+                                                                            <Checkbox
+                                                                                checked={selectedUserIds.has(
+                                                                                    user.id
+                                                                                )}
+                                                                                onCheckedChange={() => {
+                                                                                    const newSet =
+                                                                                        new Set(
+                                                                                            selectedUserIds
+                                                                                        );
+                                                                                    if (
+                                                                                        newSet.has(
+                                                                                            user.id
+                                                                                        )
+                                                                                    ) {
+                                                                                        newSet.delete(
+                                                                                            user.id
+                                                                                        );
+                                                                                    } else {
+                                                                                        newSet.add(
+                                                                                            user.id
+                                                                                        );
+                                                                                    }
+                                                                                    setSelectedUserIds(
+                                                                                        newSet
+                                                                                    );
+                                                                                }}
+                                                                            />
+                                                                        </TableCell>
                                                                         <TableCell>
                                                                             <div className="flex items-center gap-3">
                                                                                 <Avatar className="h-9 w-9">
@@ -1440,6 +1966,45 @@ export default function AdminDashboard() {
                                                                                     user.created_at
                                                                                 )}
                                                                             </p>
+                                                                        </TableCell>
+                                                                        <TableCell>
+                                                                            <Button
+                                                                                size="sm"
+                                                                                variant={
+                                                                                    user.is_waitlist_approved
+                                                                                        ? "outline"
+                                                                                        : "default"
+                                                                                }
+                                                                                className={
+                                                                                    user.is_waitlist_approved
+                                                                                        ? "text-red-600 hover:text-red-700 hover:bg-red-50 text-xs h-7"
+                                                                                        : "bg-green-600 hover:bg-green-700 text-xs h-7"
+                                                                                }
+                                                                                onClick={() =>
+                                                                                    handleToggleUserAccess(
+                                                                                        user
+                                                                                    )
+                                                                                }
+                                                                                disabled={
+                                                                                    actionLoading ===
+                                                                                    user.id
+                                                                                }
+                                                                            >
+                                                                                {actionLoading ===
+                                                                                user.id ? (
+                                                                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                                                                ) : user.is_waitlist_approved ? (
+                                                                                    <>
+                                                                                        <XCircle className="w-3 h-3 mr-1" />
+                                                                                        Revoke
+                                                                                    </>
+                                                                                ) : (
+                                                                                    <>
+                                                                                        <CheckCircle2 className="w-3 h-3 mr-1" />
+                                                                                        Approve
+                                                                                    </>
+                                                                                )}
+                                                                            </Button>
                                                                         </TableCell>
                                                                         <TableCell className="text-right">
                                                                             <div className="flex items-center justify-end gap-2">
@@ -1605,6 +2170,105 @@ export default function AdminDashboard() {
                                 <CheckCircle2 className="w-4 h-4 mr-2" />
                             )}
                             Approve User
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Email Composer Dialog */}
+            <Dialog open={showEmailDialog} onOpenChange={setShowEmailDialog}>
+                <DialogContent className="sm:max-w-[600px]">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                            <Send className="w-5 h-5" />
+                            Compose Email
+                        </DialogTitle>
+                        <DialogDescription>
+                            Send a custom email to selected users
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4 py-4">
+                        {/* Recipients */}
+                        <div className="space-y-2">
+                            <Label>Recipients ({emailRecipients.length})</Label>
+                            <div className="flex flex-wrap gap-2 p-2 border rounded-lg min-h-[60px] max-h-[120px] overflow-y-auto bg-muted/30">
+                                {emailRecipients.length === 0 ? (
+                                    <span className="text-sm text-muted-foreground">
+                                        No recipients selected
+                                    </span>
+                                ) : (
+                                    emailRecipients.map((email) => (
+                                        <span
+                                            key={email}
+                                            className="inline-flex items-center gap-1 px-2 py-1 bg-primary/10 text-primary text-xs rounded-full"
+                                        >
+                                            {email}
+                                            <button
+                                                type="button"
+                                                onClick={() =>
+                                                    removeEmailRecipient(email)
+                                                }
+                                                className="hover:text-red-500 ml-1"
+                                            >
+                                                <X className="w-3 h-3" />
+                                            </button>
+                                        </span>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Subject */}
+                        <div className="space-y-2">
+                            <Label htmlFor="email-subject">Subject</Label>
+                            <Input
+                                id="email-subject"
+                                placeholder="Enter email subject..."
+                                value={emailSubject}
+                                onChange={(e) =>
+                                    setEmailSubject(e.target.value)
+                                }
+                            />
+                        </div>
+
+                        {/* Message */}
+                        <div className="space-y-2">
+                            <Label htmlFor="email-message">Message</Label>
+                            <Textarea
+                                id="email-message"
+                                placeholder="Write your message here..."
+                                value={emailMessage}
+                                onChange={(e) =>
+                                    setEmailMessage(e.target.value)
+                                }
+                                rows={8}
+                                className="resize-none"
+                            />
+                        </div>
+                    </div>
+                    <DialogFooter>
+                        <Button
+                            variant="outline"
+                            onClick={() => setShowEmailDialog(false)}
+                            disabled={emailSending}
+                        >
+                            Cancel
+                        </Button>
+                        <Button
+                            onClick={handleSendEmail}
+                            disabled={
+                                emailSending ||
+                                emailRecipients.length === 0 ||
+                                !emailSubject.trim() ||
+                                !emailMessage.trim()
+                            }
+                        >
+                            {emailSending ? (
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            ) : (
+                                <Send className="w-4 h-4 mr-2" />
+                            )}
+                            Send Email
                         </Button>
                     </DialogFooter>
                 </DialogContent>

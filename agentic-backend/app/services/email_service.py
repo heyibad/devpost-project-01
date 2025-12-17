@@ -266,6 +266,108 @@ sahulatai.app
             logger.error(f"Failed to send welcome email to {to_email}: {str(e)}")
             return False
 
+    async def send_custom_email(
+        self,
+        to_emails: list[str],
+        subject: str,
+        message: str,
+        sender_name: str = "Sahulat AI Team",
+    ) -> dict:
+        """
+        Send a custom email to one or more recipients.
+
+        Args:
+            to_emails: List of recipient email addresses
+            subject: Email subject line
+            message: Email body (plain text, will be formatted in HTML)
+            sender_name: Name to show as sender
+
+        Returns:
+            Dict with success count and failed emails
+        """
+        if not settings.resend_api_key:
+            logger.error("Cannot send email: RESEND_API_KEY not configured")
+            return {"success_count": 0, "failed": to_emails, "error": "Email not configured"}
+
+        results = {"success_count": 0, "failed": [], "sent_to": []}
+
+        # Convert plain text message to HTML with line breaks
+        html_message = message.replace("\n", "<br>")
+
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc;">
+    <table role="presentation" style="width: 100%; border-collapse: collapse;">
+        <tr>
+            <td align="center" style="padding: 40px 20px;">
+                <table role="presentation" style="max-width: 600px; width: 100%; background-color: #ffffff; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+                    <tr>
+                        <td style="padding: 40px 40px 20px 40px; text-align: center;">
+                            <div style="background: linear-gradient(135deg, #6366f1 0%, #14b8a6 100%); padding: 16px; border-radius: 16px; display: inline-block; margin-bottom: 20px;">
+                                <span style="font-size: 32px;">🤖</span>
+                            </div>
+                            <h1 style="margin: 0 0 10px 0; font-size: 24px; color: #0f172a;">{subject}</h1>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 0 40px 40px 40px;">
+                            <div style="font-size: 16px; color: #475569; line-height: 1.8;">
+                                {html_message}
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 20px 40px 30px; border-top: 1px solid #e2e8f0;">
+                            <p style="margin: 0 0 5px 0; font-size: 14px; color: #64748b;">
+                                Best regards,<br>
+                                <strong style="color: #334155;">{"SahulatAI"}</strong>
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 20px 40px; background-color: #f8fafc; border-radius: 0 0 16px 16px; text-align: center;">
+                            <p style="margin: 0; font-size: 12px; color: #94a3b8;">
+                                Made with ❤️ in Pakistan | <a href="{settings.frontend_url}" style="color: #6366f1;">sahulatai.app</a>
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+"""
+
+        for email in to_emails:
+            try:
+                params: resend.Emails.SendParams = {
+                    "from": settings.email_from_address,
+                    "to": [email],
+                    "subject": subject,
+                    "html": html_content,
+                    "reply_to": "contact@sahulatai.app",
+                    "tags": [
+                        {"name": "type", "value": "admin-custom"},
+                    ],
+                }
+
+                email_response = resend.Emails.send(params)
+                logger.info(f"Custom email sent to {email}: {email_response.get('id')}")
+                results["success_count"] += 1
+                results["sent_to"].append(email)
+
+            except Exception as e:
+                logger.error(f"Failed to send custom email to {email}: {str(e)}")
+                results["failed"].append(email)
+
+        return results
+
 
 # Singleton instance
 email_service = EmailService()
