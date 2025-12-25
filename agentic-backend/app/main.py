@@ -49,6 +49,9 @@ sys.excepthook = custom_excepthook
 # Import unified MCP manager (single source of truth)
 from app.services.unified_mcp_manager import unified_mcp_manager
 
+# Import Datadog tracing integration
+from app.core.datadog_tracing import init_datadog_tracing, flush_traces, is_llmobs_enabled
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -58,6 +61,14 @@ async def lifespan(app: FastAPI):
     """
     # STARTUP
     print("\n🚀 Starting Agentic Backend API...")
+    
+    # Initialize Datadog LLM Observability
+    llmobs_enabled = init_datadog_tracing()
+    if llmobs_enabled:
+        print("✅ Datadog LLM Observability enabled")
+    else:
+        print("ℹ️  Datadog LLM Observability not configured (set DD_API_KEY and DD_LLMOBS_ENABLED=1)")
+    
     print("✅ Unified MCP Manager ready (connections created on-demand)")
     print("   - Port 8002: QuickBooks (Accounts agent only)")
     print("   - Port 8001: Global services (Sales, Marketing, etc.)")
@@ -105,8 +116,14 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # SHUTDOWN: Cleanup all MCP connections
+    # SHUTDOWN: Cleanup all resources
     print("\n🛑 Shutting down Agentic Backend API...")
+    
+    # Flush any pending Datadog traces
+    if is_llmobs_enabled():
+        flush_traces()
+        print("✅ Datadog traces flushed")
+    
     await unified_mcp_manager.cleanup()
 
 

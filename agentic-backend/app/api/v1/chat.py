@@ -8,8 +8,8 @@ import asyncio
 from app.core.config import settings
 from agents import (
     Runner,
-    trace,  # Not used - tracing disabled
-    set_tracing_export_api_key,  # Not used - tracing disabled
+    trace,
+    set_tracing_export_api_key,
     OpenAIChatCompletionsModel,
     RunConfig,
     ModelProvider,
@@ -38,6 +38,7 @@ from app.schema.chat import (
 from app.utils.db import get_db, engine
 from app.services.conversation_service import ConversationService
 from app.services.unified_mcp_manager import clear_request_mcp_cache
+from app.core.datadog_tracing import llmobs_workflow, annotate_span, is_llmobs_enabled
 import os
 
 
@@ -155,10 +156,30 @@ async def chat(
     messages_input = prompt.get_messages_list()
 
     try:
-        with trace("Sahulat Ai"):
-            result = await Runner.run(
-                starting_agent=agent, input=cast(Any, messages_input), run_config=config
-            )
+        # Wrap with both OpenAI Agents SDK trace and Datadog LLMObs workflow
+        # Datadog's auto-instrumentation will capture OpenAI Agents spans automatically
+        with llmobs_workflow(
+            name="chat-completion",
+            session_id=str(conversation.id),
+        ) as dd_span:
+            with trace("Sahulat Ai"):
+                result = await Runner.run(
+                    starting_agent=agent, input=cast(Any, messages_input), run_config=config
+                )
+            
+            # Annotate Datadog span with metadata
+            if dd_span:
+                annotate_span(
+                    input_data=last_message,
+                    output_data=result.final_output,
+                    metadata={
+                        "conversation_id": str(conversation.id),
+                        "tenant_id": str(current_tenant.id),
+                        "agent_name": "sahulat-ai",
+                    },
+                    span=dd_span,
+                )
+        
         reply_text = (result.final_output or "").strip()
         message_status = MessageStatus.COMPLETED.value
     except Exception as e:
@@ -299,103 +320,124 @@ async def _stream_agent_response_optimized(
         print("=====================================")
 
         stream_start = time.time()
-        with trace("Sahulat Ai"):
-            stream = Runner.run_streamed(
-                starting_agent=agent,
-                input=cast(Any, messages_input),
-                run_config=config,
-            )
-            print("========== MCP SERVERS ===========")
-            print("the following MCP servers are being used:")
-            print(stream.context_wrapper)
-            print("===================================")
+        
+        # Wrap with both OpenAI Agents SDK trace and Datadog LLMObs workflow
+        # Datadog's auto-instrumentation captures OpenAI Agents spans automatically
+        with llmobs_workflow(
+            name="chat-completion-stream",
+            session_id=str(conversation_id),
+        ) as dd_span:
+            with trace("Sahulat Ai"):
+                stream = Runner.run_streamed(
+                    starting_agent=agent,
+                    input=cast(Any, messages_input),
+                    run_config=config,
+                )
+                print("========== MCP SERVERS ===========")
+                print("the following MCP servers are being used:")
+                print(stream.context_wrapper)
+                print("===================================")
 
-        first_token_received = False
-        try:
-            async for event in stream.stream_events():
-                if not first_token_received:
-                    print(f"⚡ Time to first token: {time.time() - timing_start:.3f}s")
-                    first_token_received = True
-                # print(f"DEBUG: Received event type: {event.type}")
-                if event.type != "raw_response_event" or not isinstance(
-                    event.data, ResponseTextDeltaEvent
-                ):
-                    continue
-                delta = event.data.delta or ""
-                if not delta:
-                    continue
-                # print(f"DEBUG: Got delta: {delta[:50]}...")
-                buffer.append(delta)
+            first_token_received = False
+            try:
+                async for event in stream.stream_events():
+                    if not first_token_received:
+                        print(f"⚡ Time to first token: {time.time() - timing_start:.3f}s")
+                        first_token_received = True
+                    # print(f"DEBUG: Received event type: {event.type}")
+                    if event.type != "raw_response_event" or not isinstance(
+                        event.data, ResponseTextDeltaEvent
+                    ):
+                        continue
+                    delta = event.data.delta or ""
+                    if not delta:
+                        continue
+                    # print(f"DEBUG: Got delta: {delta[:50]}...")
+                    buffer.append(delta)
 
-                # ULTRA-OPTIMIZED: Minimal JSON - only send delta
-                # Avoid model serialization overhead
-                chunk_template["delta"] = delta
+                    # ULTRA-OPTIMIZED: Minimal JSON - only send delta
+                    # Avoid model serialization overhead
+                    chunk_template["delta"] = delta
+                    yield f"data: {json.dumps(chunk_template)}\n\n"
+            
+            except Exception as stream_error:
+                # Handle MCP tool failures during streaming
+                from agents.exceptions import AgentsException
+                from app.services.unified_mcp_manager import unified_mcp_manager
+
+                error_message = ""
+                should_invalidate = False
+                conn_type = None
+
+                if isinstance(stream_error, AgentsException):
+                    error_str = str(stream_error)
+                    if (
+                        "ClosedResourceError" in error_str
+                        or "Error invoking MCP tool" in error_str
+                    ):
+                        # MCP tool failure - user-friendly message
+                        error_message = "\n\n⚠️ I encountered an issue accessing the service. This might be due to a temporary connection problem. Please try your request again, and if the issue persists, contact support."
+                        print(f"⚠️  MCP tool error during streaming: {error_str}")
+                        # Log full error with traceback for debugging
+                        import traceback
+
+                        print(f"Full traceback:")
+                        traceback.print_exc()
+
+                        # Determine which connection failed
+                        if (
+                            "search_bills" in error_str
+                            or "get_bill" in error_str
+                            or "quickbooks" in error_str.lower()
+                        ):
+                            should_invalidate = True
+                            conn_type = "quickbooks"
+                    else:
+                        error_message = f"\n\n⚠️ I encountered an issue: {error_str[:150]}"
+                else:
+                    error_message = f"\n\n⚠️ I'm sorry, but I encountered an unexpected error: {str(stream_error)[:100]}"
+                    print(
+                        f"❌ Unexpected streaming error: {type(stream_error).__name__}: {str(stream_error)}"
+                    )
+
+                # Invalidate broken connection for auto-recovery
+                if should_invalidate and conn_type:
+                    try:
+                        await unified_mcp_manager.handle_connection_error(
+                            tenant_id, conn_type, stream_error
+                        )
+                    except Exception as cleanup_err:
+                        print(f"⚠️  Error during connection cleanup: {cleanup_err}")
+
+                # Send error message to frontend
+                buffer.append(error_message)
+                chunk_template["delta"] = error_message
                 yield f"data: {json.dumps(chunk_template)}\n\n"
 
-        except Exception as stream_error:
-            # Handle MCP tool failures during streaming
-            from agents.exceptions import AgentsException
-            from app.services.unified_mcp_manager import unified_mcp_manager
+                # Mark message as failed
+                async with AsyncSession(engine) as error_db:
+                    assistant_msg = await error_db.get(Message, assistant_message_id)
+                    if assistant_msg:
+                        assistant_msg.status = MessageStatus.FAILED.value
+                        assistant_msg.content = "".join(buffer)
+                        await error_db.commit()
 
-            error_message = ""
-            should_invalidate = False
-            conn_type = None
-
-            if isinstance(stream_error, AgentsException):
-                error_str = str(stream_error)
-                if (
-                    "ClosedResourceError" in error_str
-                    or "Error invoking MCP tool" in error_str
-                ):
-                    # MCP tool failure - user-friendly message
-                    error_message = "\n\n⚠️ I encountered an issue accessing the service. This might be due to a temporary connection problem. Please try your request again, and if the issue persists, contact support."
-                    print(f"⚠️  MCP tool error during streaming: {error_str}")
-                    # Log full error with traceback for debugging
-                    import traceback
-
-                    print(f"Full traceback:")
-                    traceback.print_exc()
-
-                    # Determine which connection failed
-                    if (
-                        "search_bills" in error_str
-                        or "get_bill" in error_str
-                        or "quickbooks" in error_str.lower()
-                    ):
-                        should_invalidate = True
-                        conn_type = "quickbooks"
-                else:
-                    error_message = f"\n\n⚠️ I encountered an issue: {error_str[:150]}"
-            else:
-                error_message = f"\n\n⚠️ I'm sorry, but I encountered an unexpected error: {str(stream_error)[:100]}"
-                print(
-                    f"❌ Unexpected streaming error: {type(stream_error).__name__}: {str(stream_error)}"
+                # Clear request-scoped MCP cache even on error
+                clear_request_mcp_cache()
+            
+            # Annotate Datadog span after streaming completes (success case)
+            if dd_span and buffer:
+                annotate_span(
+                    input_data=prompt.get_last_message_content() if prompt else None,
+                    output_data="".join(buffer),
+                    metadata={
+                        "conversation_id": str(conversation_id),
+                        "tenant_id": str(tenant_id),
+                        "agent_name": "sahulat-ai",
+                        "streaming": True,
+                    },
+                    span=dd_span,
                 )
-
-            # Invalidate broken connection for auto-recovery
-            if should_invalidate and conn_type:
-                try:
-                    await unified_mcp_manager.handle_connection_error(
-                        tenant_id, conn_type, stream_error
-                    )
-                except Exception as cleanup_err:
-                    print(f"⚠️  Error during connection cleanup: {cleanup_err}")
-
-            # Send error message to frontend
-            buffer.append(error_message)
-            chunk_template["delta"] = error_message
-            yield f"data: {json.dumps(chunk_template)}\n\n"
-
-            # Mark message as failed
-            async with AsyncSession(engine) as error_db:
-                assistant_msg = await error_db.get(Message, assistant_message_id)
-                if assistant_msg:
-                    assistant_msg.status = MessageStatus.FAILED.value
-                    assistant_msg.content = "".join(buffer)
-                    await error_db.commit()
-
-            # Clear request-scoped MCP cache even on error
-            clear_request_mcp_cache()
 
     except Exception as e:
         # Handle errors before streaming starts (agent creation, etc.)

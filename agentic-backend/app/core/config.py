@@ -128,6 +128,14 @@ class Settings(BaseSettings):
         default="Sahulat AI <contact@sahulatai.app>", alias="EMAIL_FROM_ADDRESS"
     )
 
+    # Datadog LLM Observability Configuration
+    dd_api_key: Optional[str] = Field(default=None, alias="DD_API_KEY")
+    dd_site: str = Field(default="us5.datadoghq.com", alias="DD_SITE")
+    dd_llmobs_enabled: bool = Field(default=False, alias="DD_LLMOBS_ENABLED")
+    dd_llmobs_ml_app: str = Field(default="sahulat-ai", alias="DD_LLMOBS_ML_APP")
+    dd_service: str = Field(default="agentic-backend", alias="DD_SERVICE")
+    dd_env: str = Field(default="dev", alias="DD_ENV")
+
     @property
     def cors_origins(self) -> list[str]:
         """Parse allowed origins from comma-separated string"""
