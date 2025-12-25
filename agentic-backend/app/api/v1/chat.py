@@ -164,9 +164,11 @@ async def chat(
         ) as dd_span:
             with trace("Sahulat Ai"):
                 result = await Runner.run(
-                    starting_agent=agent, input=cast(Any, messages_input), run_config=config
+                    starting_agent=agent,
+                    input=cast(Any, messages_input),
+                    run_config=config,
                 )
-            
+
             # Annotate Datadog span with metadata
             if dd_span:
                 annotate_span(
@@ -179,7 +181,7 @@ async def chat(
                     },
                     span=dd_span,
                 )
-        
+
         reply_text = (result.final_output or "").strip()
         message_status = MessageStatus.COMPLETED.value
     except Exception as e:
@@ -320,7 +322,7 @@ async def _stream_agent_response_optimized(
         print("=====================================")
 
         stream_start = time.time()
-        
+
         # Wrap with both OpenAI Agents SDK trace and Datadog LLMObs workflow
         # Datadog's auto-instrumentation captures OpenAI Agents spans automatically
         with llmobs_workflow(
@@ -342,7 +344,9 @@ async def _stream_agent_response_optimized(
             try:
                 async for event in stream.stream_events():
                     if not first_token_received:
-                        print(f"⚡ Time to first token: {time.time() - timing_start:.3f}s")
+                        print(
+                            f"⚡ Time to first token: {time.time() - timing_start:.3f}s"
+                        )
                         first_token_received = True
                     # print(f"DEBUG: Received event type: {event.type}")
                     if event.type != "raw_response_event" or not isinstance(
@@ -359,7 +363,7 @@ async def _stream_agent_response_optimized(
                     # Avoid model serialization overhead
                     chunk_template["delta"] = delta
                     yield f"data: {json.dumps(chunk_template)}\n\n"
-            
+
             except Exception as stream_error:
                 # Handle MCP tool failures during streaming
                 from agents.exceptions import AgentsException
@@ -393,7 +397,9 @@ async def _stream_agent_response_optimized(
                             should_invalidate = True
                             conn_type = "quickbooks"
                     else:
-                        error_message = f"\n\n⚠️ I encountered an issue: {error_str[:150]}"
+                        error_message = (
+                            f"\n\n⚠️ I encountered an issue: {error_str[:150]}"
+                        )
                 else:
                     error_message = f"\n\n⚠️ I'm sorry, but I encountered an unexpected error: {str(stream_error)[:100]}"
                     print(
@@ -424,7 +430,7 @@ async def _stream_agent_response_optimized(
 
                 # Clear request-scoped MCP cache even on error
                 clear_request_mcp_cache()
-            
+
             # Annotate Datadog span after streaming completes (success case)
             if dd_span and buffer:
                 annotate_span(
